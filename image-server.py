@@ -31,7 +31,7 @@ try:
     pipe = OVDiffusionPipeline.from_pretrained(
         MODEL_PATH,
         safety_checker=None,
-        device="NPU"  # Use NPU for acceleration
+        device="GPU"  # Use NPU for acceleration
     )
     print("Model loaded successfully.")
 except Exception as e:
