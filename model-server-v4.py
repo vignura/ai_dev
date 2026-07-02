@@ -9,6 +9,7 @@ import queue
 import threading
 import asyncio
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 
 # Parse command line arguments
 parser = argparse.ArgumentParser(description='Run model server with custom model name and path')
@@ -40,7 +41,7 @@ app = FastAPI()
 
 print("Loading model...")
 # Ensure this path points to your OpenVINO model directory
-pipe = ov_genai.LLMPipeline(MODEL_PATH, "GPU", CACHE_DIR="../modles/cache")
+pipe = ov_genai.LLMPipeline(MODEL_PATH, "GPU", CACHE_DIR="../models/cache")
 
 print("Model loaded.")
 
@@ -82,6 +83,59 @@ def build_prompt(messages):
     prompt += "<|assistant|>\n"
     return prompt
 
+# Global executor for offloading blocking operations
+executor = ThreadPoolExecutor(max_workers=4)
+
+async def generate_with_async_streaming(prompt: str, completion_id: str, token_queue: queue.Queue) -> None:
+    """Generate response asynchronously with token streaming."""
+    start_time = time.perf_counter()
+    first_token_time = [None]
+    token_count = [0]
+
+    def ov_streamer(subword: str):
+        # Capture Time To First Token (TTFT)
+        if first_token_time[0] is None:
+            first_token_time[0] = time.perf_counter()
+            
+        token_count[0] += 1
+        token_queue.put(subword)
+        return False  # Continue generation
+
+    try:
+        # Run generation in thread pool
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(executor, lambda: pipe.generate(prompt, streamer=ov_streamer))
+    except Exception as e:
+        print(f"Generation error: {e}")
+    finally:
+        end_time = time.perf_counter()
+        token_queue.put(None)  # Signal completion to the async loop
+        
+        # --- Calculate and Print Stats ---
+        ttft = (first_token_time[0] - start_time) if first_token_time[0] else 0
+        total_time = end_time - start_time
+        gen_time = total_time - ttft
+        speed = token_count[0] / gen_time if gen_time > 0 else 0
+        
+        # Try to get exact prompt tokens, fallback to estimation if API differs
+        try:
+            # OV GenAI usually allows encoding to get token count
+            prompt_tokens = pipe.get_tokenizer().encode(prompt).get_shape()[1]
+        except:
+            prompt_tokens = int(len(prompt) / 3.5) # Safe heuristic
+            
+        print("\n" + "=" * 58)
+        print(f"Model              : {MODEL_NAME}")
+        print(f"Prompt Tokens      : {prompt_tokens}")
+        print(f"Completion Tokens  : {token_count[0]}")
+        print("")
+        print(f"TTFT               : {ttft:.2f} s")
+        print(f"Generation         : {gen_time:.2f} s")
+        print(f"Total Request      : {total_time:.2f} s")
+        print("")
+        print(f"Generation Speed   : {speed:.1f} tok/s")
+        print("=" * 58 + "\n")
+
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request):
     try:
@@ -95,10 +149,6 @@ async def chat_completions(request: Request):
         stream = data.get("stream", False)
         
         prompt = build_prompt(messages)
-        
-        # print("=" * 80)
-        # print(prompt)
-        # print("=" * 80)
         
         completion_id = f"chatcmpl-{uuid.uuid4().hex}"
         
@@ -116,65 +166,17 @@ async def chat_completions(request: Request):
                 # 2. Set up a queue to hold tokens as they are generated
                 token_queue = queue.Queue()
 
-                # 3 & 4. Setup timers, counts, and the background thread
-                def run_generation():
-                    start_time = time.perf_counter()
-                    first_token_time = [None]
-                    token_count = [0]
-                    
-                    def ov_streamer(subword: str):
-                        # Capture Time To First Token (TTFT)
-                        if first_token_time[0] is None:
-                            first_token_time[0] = time.perf_counter()
-                            
-                        token_count[0] += 1
-                        token_queue.put(subword)
-                        return False  # Continue generation
+                # 3. Start generation in background thread
+                generation_task = asyncio.create_task(generate_with_async_streaming(prompt, completion_id, token_queue))
 
-                    try:
-                        pipe.generate(prompt, streamer=ov_streamer)
-                    except Exception as e:
-                        print(f"Generation error: {e}")
-                    finally:
-                        end_time = time.perf_counter()
-                        token_queue.put(None)  # Signal completion to the async loop
-                        
-                        # --- Calculate and Print Stats ---
-                        ttft = (first_token_time[0] - start_time) if first_token_time[0] else 0
-                        total_time = end_time - start_time
-                        gen_time = total_time - ttft
-                        speed = token_count[0] / gen_time if gen_time > 0 else 0
-                        
-                        # Try to get exact prompt tokens, fallback to estimation if API differs
-                        try:
-                            # OV GenAI usually allows encoding to get token count
-                            prompt_tokens = pipe.get_tokenizer().encode(prompt).get_shape()[1]
-                        except:
-                            prompt_tokens = int(len(prompt) / 3.5) # Safe heuristic
-                            
-                        print("\n" + "=" * 58)
-                        print(f"Model              : {MODEL_NAME}")
-                        print(f"Prompt Tokens      : {prompt_tokens}")
-                        print(f"Completion Tokens  : {token_count[0]}")
-                        print("")
-                        print(f"TTFT               : {ttft:.2f} s")
-                        print(f"Generation         : {gen_time:.2f} s")
-                        print(f"Total Request      : {total_time:.2f} s")
-                        print("")
-                        print(f"Generation Speed   : {speed:.1f} tok/s")
-                        print("=" * 58 + "\n")
-
-                thread = threading.Thread(target=run_generation)
-                thread.start()
-
-                # 5. Read from the queue and send to client instantly
+                # 4. Read from the queue and send to client instantly
                 while True:
                     try:
                         # Try to grab a token without blocking the async loop
                         token = token_queue.get_nowait()
                     except queue.Empty:
                         # If queue is empty, wait a tiny fraction of a second and check again
-                        await asyncio.sleep(0.01)
+                        await asyncio.sleep(0.001)
                         continue
                         
                     # If we hit the None signal, break the loop
@@ -190,7 +192,10 @@ async def chat_completions(request: Request):
                         }) + "\n\n"
                     )
 
-                # 6. Send the final stop sequence
+                # Wait for generation to complete
+                await generation_task
+
+                # 5. Send the final stop sequence
                 yield (
                     "data: " + json.dumps({
                         "id": completion_id, "object": "chat.completion.chunk",
