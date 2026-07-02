@@ -40,7 +40,8 @@ app = FastAPI()
 
 print("Loading model...")
 # Ensure this path points to your OpenVINO model directory
-pipe = ov_genai.LLMPipeline(MODEL_PATH, "GPU")
+pipe = ov_genai.LLMPipeline(MODEL_PATH, "GPU", CACHE_DIR="../modles/cache")
+
 print("Model loaded.")
 
 @app.get("/v1/models")
