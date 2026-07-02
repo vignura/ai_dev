@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Image Generator</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 600px;
+            margin: auto;
+            padding: 20px;
+        }
+        #promptInput {
+            width: 70%;
+            padding: 10px;
+        }
+        #generateBtn {
+            width: 25%;
+            padding: 10px;
+        }
+        #imageContainer {
+            margin-top: 20px;
+            text-align: center;
+        }
+        #generatedImage {
+            max-width: 100%;
+            border: 1px solid #ccc;
+        }
+    </style>
+</head>
+<body>
+    <h1>Image Generator</h1>
+    <div>
+        <input type="text" id="promptInput" placeholder="Enter your prompt here...">
+        <button id="generateBtn">Generate Image</button>
+    </div>
+    <div id="imageContainer">
+        <img id="generatedImage" src="" alt="Generated Image" style="display:none;">
+    </div>
+
+    <script>
+        document.getElementById('generateBtn').addEventListener('click', async () => {
+            const prompt = document.getElementById('promptInput').value.trim();
+            if (!prompt) return;
+
+            // Show loading state
+            const img = document.getElementById('generatedImage');
+            img.style.display = 'none';
+            alert("Generating image... Please wait.");
+
+            try {
+                const response = await fetch('http://127.0.0.1:8001/v1/image/generations', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        prompt: prompt,
+                        stream: false
+                    })
+                });
+
+                const result = await response.json();
+
+                // Convert base64 to blob and set as image source
+                const byteCharacters = atob(result.image);
+                const byteNumbers = new Array(byteCharacters.length);
+                for (let i = 0; i < byteCharacters.length; i++) {
+                    byteNumbers[i] = byteCharacters.charCodeAt(i);
+                }
+                const byteArray = new Uint8Array(byteNumbers);
+                const blob = new Blob([byteArray], { type: 'image/png' });
+                const imageUrl = URL.createObjectURL(blob);
+
+                // Display the image
+                img.src = imageUrl;
+                img.style.display = 'block';
+            } catch (error) {
+                alert("Error generating image: " + error.message);
+            }
+        });
+    </script>
+</body>
+</html>
