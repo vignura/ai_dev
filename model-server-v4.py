@@ -5,11 +5,10 @@ import uvicorn
 import json
 import time
 import uuid
-import queue
-import threading
 import asyncio
 import argparse
 from concurrent.futures import ThreadPoolExecutor
+from typing import AsyncGenerator
 
 # Parse command line arguments
 parser = argparse.ArgumentParser(description='Run model server with custom model name and path')
@@ -86,7 +85,7 @@ def build_prompt(messages):
 # Global executor for offloading blocking operations
 executor = ThreadPoolExecutor(max_workers=4)
 
-async def generate_with_async_streaming(prompt: str, completion_id: str, token_queue: queue.Queue) -> None:
+async def generate_with_async_streaming(prompt: str, completion_id: str, token_queue: asyncio.Queue) -> None:
     """Generate response asynchronously with token streaming."""
     start_time = time.perf_counter()
     first_token_time = [None]
@@ -98,7 +97,12 @@ async def generate_with_async_streaming(prompt: str, completion_id: str, token_q
             first_token_time[0] = time.perf_counter()
             
         token_count[0] += 1
-        token_queue.put(subword)
+        # Use put_nowait to avoid blocking
+        try:
+            token_queue.put_nowait(subword)
+        except asyncio.QueueFull:
+            # If queue is full, we might lose some tokens but that's acceptable
+            pass
         return False  # Continue generation
 
     try:
@@ -109,7 +113,8 @@ async def generate_with_async_streaming(prompt: str, completion_id: str, token_q
         print(f"Generation error: {e}")
     finally:
         end_time = time.perf_counter()
-        token_queue.put(None)  # Signal completion to the async loop
+        # Signal completion
+        await token_queue.put(None)
         
         # --- Calculate and Print Stats ---
         ttft = (first_token_time[0] - start_time) if first_token_time[0] else 0
@@ -153,7 +158,7 @@ async def chat_completions(request: Request):
         completion_id = f"chatcmpl-{uuid.uuid4().hex}"
         
         if stream:
-            async def event_stream():
+            async def event_stream() -> AsyncGenerator[str, None]:
                 # 1. Send the initial role setup chunk
                 yield (
                     "data: " + json.dumps({
@@ -163,8 +168,8 @@ async def chat_completions(request: Request):
                     }) + "\n\n"
                 )
 
-                # 2. Set up a queue to hold tokens as they are generated
-                token_queue = queue.Queue()
+                # 2. Set up an asyncio queue to hold tokens as they are generated
+                token_queue = asyncio.Queue(maxsize=100)
 
                 # 3. Start generation in background thread
                 generation_task = asyncio.create_task(generate_with_async_streaming(prompt, completion_id, token_queue))
@@ -172,11 +177,10 @@ async def chat_completions(request: Request):
                 # 4. Read from the queue and send to client instantly
                 while True:
                     try:
-                        # Try to grab a token without blocking the async loop
-                        token = token_queue.get_nowait()
-                    except queue.Empty:
-                        # If queue is empty, wait a tiny fraction of a second and check again
-                        await asyncio.sleep(0.001)
+                        # Wait for next token with timeout to prevent hanging
+                        token = await asyncio.wait_for(token_queue.get(), timeout=0.1)
+                    except asyncio.TimeoutError:
+                        # If we timeout, it means no tokens are coming through
                         continue
                         
                     # If we hit the None signal, break the loop
