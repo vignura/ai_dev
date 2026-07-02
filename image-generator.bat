@@ -36,7 +36,7 @@ if exist "%TEMP%\response.json" (
     powershell -Command ^
     "$json = Get-Content '%TEMP%\response.json' | ConvertFrom-Json; " ^
     "[System.IO.File]::WriteAllBytes('%output_file%', [System.Convert]::FromBase64String($json.image))"
-
+    
     :: Check if image file was created successfully
     if exist "%output_file%" (
         echo Image saved to: %output_file%
