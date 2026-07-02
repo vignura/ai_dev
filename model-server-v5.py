@@ -56,10 +56,12 @@ DEFAULT_CONTEXT_WINDOW = 32768
 parser = argparse.ArgumentParser(description='Run model server with custom model name and path')
 parser.add_argument('--model-name', type=str, default='qwen3-coder-30b', help='Name of the model')
 parser.add_argument('--model-path', type=str, default='./qwen3-coder-30b-a3b-int4', help='Path to the model directory')
+parser.add_argument('--cache-dir', type=str, default='../modles/cache', help='Path to the cache directory')
 args = parser.parse_args()
 
 MODEL_NAME = args.model_name
 MODEL_PATH = args.model_path
+CACHE_DIR = args.cache_dir
 
 # Get context window size for the current model
 CONTEXT_WINDOW = MODEL_CONTEXT_WINDOWS.get(MODEL_NAME, DEFAULT_CONTEXT_WINDOW)
@@ -213,7 +215,7 @@ async def lifespan(app: FastAPI):
     if HAS_OPENVINO:
         try:
             print("Loading model...")
-            pipe = ov_genai.LLMPipeline(MODEL_PATH, "GPU")
+            pipe = ov_genai.LLMPipeline(MODEL_PATH, "GPU", CACHE_DIR=CACHE_DIR)
             print("Model loaded successfully.")
         except Exception as e:
             print(f"Failed to load model: {e}")
