@@ -1,5 +1,6 @@
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 import json
 import time
@@ -10,6 +11,16 @@ from concurrent.futures import ThreadPoolExecutor
 from PIL import Image
 import io
 import base64
+
+# Add CORS middleware to handle preflight requests
+app = FastAPI()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Parse command line arguments
 parser = argparse.ArgumentParser(description='Run image generation server with custom model name and path')
@@ -22,8 +33,6 @@ DEBUG_MODE = args.debug
 
 MODEL_NAME = args.model_name
 MODEL_PATH = args.model_path
-
-app = FastAPI()
 
 print("Loading image generation model...")
 try:
