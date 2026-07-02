@@ -14,7 +14,10 @@ import argparse
 parser = argparse.ArgumentParser(description='Run model server with custom model name and path')
 parser.add_argument('--model-name', type=str, default='qwen3-coder-30b', help='Name of the model')
 parser.add_argument('--model-path', type=str, default='./qwen3-coder-30b-a3b-int4', help='Path to the model directory')
+parser.add_argument('--debug', action='store_true', help='Enable debug mode to log incoming requests')
 args = parser.parse_args()
+
+DEBUG_MODE = args.debug
 
 MODEL_NAME = args.model_name
 MODEL_PATH = args.model_path
@@ -82,6 +85,11 @@ def build_prompt(messages):
 async def chat_completions(request: Request):
     try:
         data = await request.json()
+        
+        if DEBUG_MODE:
+            print("Debug: Incoming request body:")
+            print(json.dumps(data, indent=2))
+            
         messages = data.get("messages", [])
         stream = data.get("stream", False)
         
