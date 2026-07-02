@@ -27,10 +27,11 @@ app = FastAPI()
 
 print("Loading image generation model...")
 try:
-    from diffusers import StableDiffusionPipeline
-    pipe = StableDiffusionPipeline.from_pretrained(
+    from optimum.intel.openvino import OVDiffusionPipeline
+    pipe = OVDiffusionPipeline.from_pretrained(
         MODEL_PATH,
-        provider="NPU"  # Use NPU for acceleration
+        safety_checker=None,
+        device="NPU"  # Use NPU for acceleration
     )
     print("Model loaded successfully.")
 except Exception as e:
@@ -65,7 +66,10 @@ async def generate_image_with_async_streaming(prompt: str, image_id: str, image_
     try:
         # Run image generation in thread pool
         loop = asyncio.get_event_loop()
-        image = await loop.run_in_executor(executor, lambda: pipe(prompt).images[0])
+        image_tensor = await loop.run_in_executor(executor, lambda: pipe(prompt, num_inference_steps=20))
+        
+        # Convert tensor to PIL Image
+        image = Image.fromarray(image_tensor.data[0])
         
         # Save image to bytes
         image_bytes = io.BytesIO()
@@ -168,7 +172,8 @@ async def image_generations(request: Request):
             # Non-streaming fallback
             start_time = time.perf_counter()
             
-            image = pipe(prompt).images[0]
+            image_tensor = pipe(prompt, num_inference_steps=20)
+            image = Image.fromarray(image_tensor.data[0])
             
             end_time = time.perf_counter()
             total_time = end_time - start_time
