@@ -11,6 +11,9 @@ import requests
 from ddgs import DDGS
 from concurrent.futures import ThreadPoolExecutor
 from typing import AsyncGenerator, Dict, Any
+import logging
+import time
+from functools import wraps
 
 # Parse command line arguments
 parser = argparse.ArgumentParser(description='Run model server with custom model name and path')
@@ -71,6 +74,16 @@ READ_URL_TOOL_SCHEMA = {
     }
 }
 
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Circuit breaker constants
+MAX_RETRIES = 3
+RETRY_DELAY = 1
+BACKOFF_MULTIPLIER = 2
+TIMEOUT = 30
+
 # Map tools to their triggering tags
 TOOL_TAGS = {
     "web_search": "<|web_search|>",
@@ -124,7 +137,7 @@ def build_prompt(messages):
     prompt += """CRITICAL RULES FOR TOOL USAGE:
                 1. You MUST use `web_search` for any factual queries, version checks, or current events. Do not answer from memory.
                 2. If the `web_search` snippets do not contain enough deep technical detail, you MUST use `read_url` on the most relevant official documentation link provided in the search results.
-                3. Output exactly `<|tool_name|> {"parameter_name": "value"}`.
+                3. Output exactly <|web_search|> {"query": "search term here"}` if you want to use web_search, and <|read_url|> {"url": "https://example.com"}` if you want to read a URL. Do not add any extra text or commentary in the tool call.
                 THE "KNOW-YOUR-LIMITS" RULE: If you cannot find the exact technical details in the search results or the URL content, admit: 
                 "I cannot find the specific details for [X] in the current technical documentation," and provide a summary of what you *did* find.
                 """
@@ -149,35 +162,56 @@ async def execute_tool_call(tool_call: dict) -> dict:
     tool_name = tool_call.get("function", {}).get("name")
     tool_args = json.loads(tool_call.get("function", {}).get("arguments", "{}"))
     
+    # Validate tool arguments against schema
     if tool_name == "web_search":
+        required_params = ["query"]
+        if not all(param in tool_args for param in required_params):
+            return {"error": f"Missing required parameters for web_search: {required_params}"}
+        
         query = tool_args.get("query")
         if DEBUG_MODE: print(f"\n[INTERNAL] 🔎 Searching web for: '{query}'")
         
-        try:
-            # Performs a quick web search and returns the top 3 results
-            results = DDGS().text(query, max_results=3)
-            return {
-                "type": "search_result",
-                "query": query,
-                "results": results # Contains 'title', 'href', and 'body'
-            }
-        except Exception as e:
-            return {"error": f"Search failed: {str(e)}"}
-
+        # Add circuit breaker pattern for web search
+        for attempt in range(MAX_RETRIES):
+            try:
+                # Performs a quick web search and returns the top 3 results
+                results = DDGS().text(query, max_results=3)
+                return {
+                    "type": "search_result",
+                    "query": query,
+                    "results": results # Contains 'title', 'href', and 'body'
+                }
+            except Exception as e:
+                logger.error(f"Web search attempt {attempt + 1} failed: {str(e)}")
+                if attempt < MAX_RETRIES - 1:
+                    time.sleep(RETRY_DELAY * (BACKOFF_MULTIPLIER ** attempt))
+                else:
+                    return {"error": f"Search failed after {MAX_RETRIES} attempts: {str(e)}"}
+    
     elif tool_name == "read_url":
+        required_params = ["url"]
+        if not all(param in tool_args for param in required_params):
+            return {"error": f"Missing required parameters for read_url: {required_params}"}
+            
         target_url = tool_args.get("url")
         if DEBUG_MODE: print(f"\n[INTERNAL] 📖 Reading URL: '{target_url}'")
         
-        try:
-            # Jina AI instantly converts any URL into LLM-ready Markdown
-            response = requests.get(f"https://r.jina.ai/{target_url}")
-            return {
-                "type": "url_content",
-                "url": target_url,
-                "markdown_content": response.text[:15000] # Cap length to protect context window
-            }
-        except Exception as e:
-            return {"error": f"Failed to read URL: {str(e)}"}
+        # Add circuit breaker pattern for URL reading
+        for attempt in range(MAX_RETRIES):
+            try:
+                # Jina AI instantly converts any URL into LLM-ready Markdown
+                response = requests.get(f"https://r.jina.ai/{target_url}", timeout=TIMEOUT)
+                return {
+                    "type": "url_content",
+                    "url": target_url,
+                    "markdown_content": response.text[:15000] # Cap length to protect context window
+                }
+            except Exception as e:
+                logger.error(f"URL read attempt {attempt + 1} failed: {str(e)}")
+                if attempt < MAX_RETRIES - 1:
+                    time.sleep(RETRY_DELAY * (BACKOFF_MULTIPLIER ** attempt))
+                else:
+                    return {"error": f"Failed to read URL after {MAX_RETRIES} attempts: {str(e)}"}
             
     return {"error": "Unknown tool"}
 
@@ -236,7 +270,9 @@ async def generate_with_async_streaming(prompt: str, completion_id: str, token_q
                                     stream_state.tool_args = parsed_obj # Store full args
                                     stream_state.abort_generation = True
                                     return True 
-                            except json.JSONDecodeError:
+                            except json.JSONDecodeError as e:
+                                logger.error(f"JSON parsing error in tool call: {e}")
+                                # Continue processing instead of failing completely
                                 pass
                 return False
             
